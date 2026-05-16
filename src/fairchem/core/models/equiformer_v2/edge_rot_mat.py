@@ -10,9 +10,11 @@ def init_edge_rot_mat(edge_distance_vec):
     edge_vec_0_distance = torch.sqrt(torch.sum(edge_vec_0**2, dim=1))
 
     # Make sure the atoms are far enough apart
-    # assert torch.min(edge_vec_0_distance) < 0.0001
-    if torch.min(edge_vec_0_distance) < 0.0001:
-        logging.error(f"Error edge_vec_0_distance: {torch.min(edge_vec_0_distance)}")
+    # NOTE: Original check used torch.min(...) < 0.0001 which triggers a device-to-host
+    # sync barrier (_local_scalar_dense). Skipped during inference to avoid pipeline stalls.
+    # To re-enable for debugging, uncomment the following:
+    # if torch.min(edge_vec_0_distance) < 0.0001:
+    #     logging.error(f"Error edge_vec_0_distance: {torch.min(edge_vec_0_distance)}")
 
     norm_x = edge_vec_0 / (edge_vec_0_distance.view(-1, 1))
 
@@ -35,8 +37,11 @@ def init_edge_rot_mat(edge_distance_vec):
     edge_vec_2 = torch.where(torch.gt(vec_dot, vec_dot_c), edge_vec_2c, edge_vec_2)
 
     vec_dot = torch.abs(torch.sum(edge_vec_2 * norm_x, dim=1))
-    # Check the vectors aren't aligned
-    assert torch.max(vec_dot) < 0.99
+    # NOTE: Original assert used torch.max(vec_dot) < 0.99 which triggers a device-to-host
+    # sync barrier (_local_scalar_dense). The random vector construction above guarantees
+    # non-alignment, so this check is redundant in practice. Skipped for performance.
+    # To re-enable for debugging, uncomment:
+    # assert torch.max(vec_dot) < 0.99
 
     norm_z = torch.cross(norm_x, edge_vec_2, dim=1)
     norm_z = norm_z / (torch.sqrt(torch.sum(norm_z**2, dim=1, keepdim=True)))

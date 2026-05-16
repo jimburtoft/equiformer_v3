@@ -5,7 +5,11 @@ import math
 
 import torch
 import torch.nn as nn
-import torch_geometric
+
+try:
+    import torch_geometric  # noqa: F401 (optional, no longer used at runtime)
+except ImportError:
+    pass
 
 from fairchem.core.common import gp_utils
 
@@ -20,6 +24,42 @@ from .layer_norm import get_normalization_layer
 from .radial_function import RadialFunction
 from .so2_ops import SO2_Convolution
 from .so3 import SO3_Embedding, SO3_LinearV2
+
+
+def scatter_softmax(
+    src: torch.Tensor, index: torch.Tensor, num_nodes: int
+) -> torch.Tensor:
+    """Numerically-stable softmax grouped by `index`, without device-to-host sync.
+
+    Replaces torch_geometric.utils.softmax which internally calls .item() to
+    determine the number of groups, triggering a _local_scalar_dense sync barrier.
+
+    Args:
+        src: Edge-level scores of shape [num_edges] or [num_edges, num_heads].
+        index: Target node index for each edge, shape [num_edges].
+        num_nodes: Total number of nodes (used to allocate scatter buffers).
+
+    Returns:
+        Softmax-normalized scores with the same shape as `src`.
+    """
+    # Expand index to broadcast over extra dimensions of src
+    idx = index
+    for _ in range(src.dim() - 1):
+        idx = idx.unsqueeze(-1)
+    idx = idx.expand_as(src)
+
+    # Numerical stability: subtract per-group max
+    fill_value = torch.finfo(src.dtype).min
+    max_buffer = src.new_full((num_nodes, *src.shape[1:]), fill_value)
+    max_buffer.scatter_reduce_(0, idx, src, reduce="amax", include_self=True)
+    src_max = max_buffer.gather(0, idx)
+    out = (src - src_max).exp()
+
+    # Normalize by per-group sum
+    sum_buffer = src.new_zeros((num_nodes, *src.shape[1:]))
+    sum_buffer.scatter_add_(0, idx, out)
+    out_sum = sum_buffer.gather(0, idx)
+    return out / (out_sum + 1e-16)
 
 
 class SO2EquivariantGraphAttention(torch.nn.Module):
@@ -331,7 +371,9 @@ class SO2EquivariantGraphAttention(torch.nn.Module):
             x_0_alpha = self.alpha_norm(x_0_alpha)
             x_0_alpha = self.alpha_act(x_0_alpha)
             alpha = torch.einsum("bik, ik -> bi", x_0_alpha, self.alpha_dot)
-        alpha = torch_geometric.utils.softmax(alpha, edge_index[1])
+        alpha = scatter_softmax(
+            alpha, edge_index[1], num_nodes=len(x.embedding) + node_offset
+        )
         alpha = alpha.reshape(alpha.shape[0], 1, self.num_heads, 1)
         if self.alpha_dropout is not None:
             alpha = self.alpha_dropout(alpha)

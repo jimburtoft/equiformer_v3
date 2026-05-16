@@ -151,7 +151,7 @@ class SO2_Convolution(torch.nn.Module):
         offset_rad = 0
 
         # Compute m=0 coefficients separately since they only have real values (no imaginary)
-        x_0 = x.embedding.narrow(1, 0, self.mappingReduced.m_size[0])
+        x_0 = x.embedding.narrow(1, 0, self.mappingReduced.m_size_list[0])
         x_0 = x_0.reshape(num_edges, -1)
         if self.rad_func is not None:
             x_edge_0 = x_edge.narrow(1, 0, self.fc_m0.in_features)
@@ -169,15 +169,15 @@ class SO2_Convolution(torch.nn.Module):
             )
 
         x_0 = x_0.view(num_edges, -1, self.m_output_channels)
-        # x.embedding[:, 0 : self.mappingReduced.m_size[0]] = x_0
+        # x.embedding[:, 0 : self.mappingReduced.m_size_list[0]] = x_0
         out.append(x_0)
         offset_rad = offset_rad + self.fc_m0.in_features
 
         # Compute the values for the m > 0 coefficients
-        offset = self.mappingReduced.m_size[0]
+        offset = self.mappingReduced.m_size_list[0]
         for m in range(1, max(self.mmax_list) + 1):
             # Get the m order coefficients
-            x_m = x.embedding.narrow(1, offset, 2 * self.mappingReduced.m_size[m])
+            x_m = x.embedding.narrow(1, offset, 2 * self.mappingReduced.m_size_list[m])
             x_m = x_m.reshape(num_edges, 2, -1)
 
             # Perform SO(2) convolution
@@ -191,9 +191,9 @@ class SO2_Convolution(torch.nn.Module):
                 x_m = x_m * x_edge_m
             x_m = self.so2_m_conv[m - 1](x_m)
             x_m = x_m.view(num_edges, -1, self.m_output_channels)
-            # x.embedding[:, offset : offset + 2 * self.mappingReduced.m_size[m]] = x_m
+            # x.embedding[:, offset : offset + 2 * self.mappingReduced.m_size_list[m]] = x_m
             out.append(x_m)
-            offset = offset + 2 * self.mappingReduced.m_size[m]
+            offset = offset + 2 * self.mappingReduced.m_size_list[m]
             offset_rad = offset_rad + self.so2_m_conv[m - 1].fc.in_features
 
         out = torch.cat(out, dim=1)
@@ -304,7 +304,7 @@ class SO2_Linear(torch.nn.Module):
         offset_rad = 0
 
         # Compute m=0 coefficients separately since they only have real values (no imaginary)
-        x_0 = x.embedding.narrow(1, 0, self.mappingReduced.m_size[0])
+        x_0 = x.embedding.narrow(1, 0, self.mappingReduced.m_size_list[0])
         x_0 = x_0.reshape(batch_size, -1)
         if self.rad_func is not None:
             x_edge_0 = x_edge.narrow(1, 0, self.fc_m0.in_features)
@@ -315,10 +315,10 @@ class SO2_Linear(torch.nn.Module):
         offset_rad = offset_rad + self.fc_m0.in_features
 
         # Compute the values for the m > 0 coefficients
-        offset = self.mappingReduced.m_size[0]
+        offset = self.mappingReduced.m_size_list[0]
         for m in range(1, max(self.mmax_list) + 1):
             # Get the m order coefficients
-            x_m = x.embedding.narrow(1, offset, 2 * self.mappingReduced.m_size[m])
+            x_m = x.embedding.narrow(1, offset, 2 * self.mappingReduced.m_size_list[m])
             x_m = x_m.reshape(batch_size, 2, -1)
             if self.rad_func is not None:
                 x_edge_m = x_edge.narrow(
@@ -334,7 +334,7 @@ class SO2_Linear(torch.nn.Module):
             x_m = x_m.view(batch_size, -1, self.m_output_channels)
             out.append(x_m)
 
-            offset = offset + 2 * self.mappingReduced.m_size[m]
+            offset = offset + 2 * self.mappingReduced.m_size_list[m]
             offset_rad = offset_rad + self.so2_m_fc[m - 1].in_features
 
         out = torch.cat(out, dim=1)

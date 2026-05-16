@@ -100,6 +100,10 @@ class CoefficientMappingModule(torch.nn.Module):
         self.register_buffer("to_m", to_m)
         self.register_buffer("m_size", m_size)
 
+        # Pre-compute m_size as a Python list to avoid device sync barriers
+        # when used as arguments to .narrow() on accelerator tensors.
+        self.m_size_list: list[int] = m_size.tolist()
+
         # for caching the output of `coefficient_idx`
         self.lmax_cache, self.mmax_cache = None, None
         self.mask_indices_cache = None

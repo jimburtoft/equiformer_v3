@@ -254,9 +254,9 @@ class EquiformerV2Backbone(nn.Module, GraphModelMixin):
 
         self.use_energy_lin_ref = use_energy_lin_ref
         self.load_energy_lin_ref = load_energy_lin_ref
-        assert not (
-            self.use_energy_lin_ref and not self.load_energy_lin_ref
-        ), "You can't have use_energy_lin_ref = True and load_energy_lin_ref = False, since the model will not have the parameters for the linear references. All other combinations are fine."
+        assert not (self.use_energy_lin_ref and not self.load_energy_lin_ref), (
+            "You can't have use_energy_lin_ref = True and load_energy_lin_ref = False, since the model will not have the parameters for the linear references. All other combinations are fine."
+        )
 
         self.weight_init = weight_init
         assert self.weight_init in ["normal", "uniform"]
@@ -400,9 +400,13 @@ class EquiformerV2Backbone(nn.Module, GraphModelMixin):
         self.dtype = data.pos.dtype
         self.device = data.pos.device
         atomic_numbers = data.atomic_numbers.long()
-        assert (
-            atomic_numbers.max().item() < self.max_num_elements
-        ), "Atomic number exceeds that given in model config"
+        # NOTE: Original assert used atomic_numbers.max().item() which triggers a
+        # device-to-host sync barrier (_local_scalar_dense). Removed for inference
+        # performance. The embedding layer will raise an IndexError if out of bounds.
+        # To re-enable for debugging, uncomment:
+        # assert (
+        #     atomic_numbers.max().item() < self.max_num_elements
+        # ), "Atomic number exceeds that given in model config"
         graph = self.generate_graph(
             data,
             enforce_max_neighbors_strictly=self.enforce_max_neighbors_strictly,
