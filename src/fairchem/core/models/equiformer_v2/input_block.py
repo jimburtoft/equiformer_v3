@@ -49,8 +49,10 @@ class EdgeDegreeEmbedding(torch.nn.Module):
         self.SO3_rotation = SO3_rotation
         self.mappingReduced = mappingReduced
 
-        self.m_0_num_coefficients: int = self.mappingReduced.m_size[0]
-        self.m_all_num_coefficents: int = len(self.mappingReduced.l_harmonic)
+        # Use m_size_list (Python list of ints) instead of m_size tensor to avoid
+        # _local_scalar_dense graph breaks in torch.compile.
+        self.m_0_num_coefficients: int = int(self.mappingReduced.m_size_list[0])
+        self.m_all_num_coefficents: int = int(len(self.mappingReduced.l_harmonic))
 
         # Create edge scalar (invariant to rotations) features
         # Embedding function of the atomic numbers
