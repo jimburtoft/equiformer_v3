@@ -540,6 +540,93 @@ class EquiformerV2Backbone(nn.Module, GraphModelMixin):
 
         return {"node_embedding": x, "graph": graph}
 
+    def forward_static(self, graph, atomic_numbers, data_batch):
+        """Forward pass with pre-computed graph (bypasses generate_graph).
+
+        Use this for torch.compile compatibility. All dynamic-shape operations
+        (radius graph, nonzero filtering, repeat_interleave) are done externally.
+
+        Args:
+            graph: GraphData with .edge_index, .edge_distance, .edge_distance_vec,
+                   .atomic_numbers_full (all padded to static shapes).
+            atomic_numbers: Long tensor [num_nodes] of atomic numbers.
+            data_batch: Long tensor [num_nodes] of batch indices.
+
+        Returns:
+            dict with "node_embedding" (SO3_Embedding) and "graph" (GraphData).
+        """
+        self.batch_size = 1  # Static for compile
+        self.dtype = graph.edge_distance_vec.dtype
+        self.device = graph.edge_distance_vec.device
+
+        # Clone edge_distance since it gets mutated by distance_expansion
+        edge_distance_raw = graph.edge_distance.clone()
+
+        # Initialize rotation matrices
+        edge_rot_mat = self._init_edge_rot_mat(
+            None, graph.edge_index, graph.edge_distance_vec
+        )
+        for i in range(self.num_resolutions):
+            self.SO3_rotation[i].set_wigner(edge_rot_mat)
+
+        # Initialize node embeddings
+        x = SO3_Embedding(
+            len(atomic_numbers),
+            self.lmax_list,
+            self.sphere_channels,
+            self.device,
+            self.dtype,
+        )
+
+        offset_res = 0
+        offset = 0
+        for i in range(self.num_resolutions):
+            if self.num_resolutions == 1:
+                x.embedding[:, offset_res, :] = self.sphere_embedding(atomic_numbers)
+            else:
+                x.embedding[:, offset_res, :] = self.sphere_embedding(atomic_numbers)[
+                    :, offset : offset + self.sphere_channels
+                ]
+            offset = offset + self.sphere_channels
+            offset_res = offset_res + int((self.lmax_list[i] + 1) ** 2)
+
+        # Edge encoding (use cloned raw distance)
+        edge_distance_enc = self.distance_expansion(edge_distance_raw)
+        if self.share_atom_edge_embedding and self.use_atom_edge_embedding:
+            source_element = graph.atomic_numbers_full[graph.edge_index[0]]
+            target_element = graph.atomic_numbers_full[graph.edge_index[1]]
+            source_embedding = self.source_embedding(source_element)
+            target_embedding = self.target_embedding(target_element)
+            edge_distance_enc = torch.cat(
+                (edge_distance_enc, source_embedding, target_embedding), dim=1
+            )
+
+        # Edge-degree embedding
+        edge_degree = self.edge_degree_embedding(
+            graph.atomic_numbers_full,
+            edge_distance_enc,
+            graph.edge_index,
+            len(atomic_numbers),
+            graph.node_offset,
+        )
+        x.embedding = x.embedding + edge_degree.embedding
+
+        # Transformer blocks
+        for i in range(self.num_layers):
+            x = self.blocks[i](
+                x,
+                graph.atomic_numbers_full,
+                edge_distance_enc,
+                graph.edge_index,
+                batch=data_batch,
+                node_offset=graph.node_offset,
+            )
+
+        # Final norm
+        x.embedding = self.norm(x.embedding)
+
+        return {"node_embedding": x, "graph": graph}
+
     def _init_gp_partitions(
         self,
         atomic_numbers_full,
