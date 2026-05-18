@@ -106,6 +106,7 @@ class EdgeDegreeEmbedding(torch.nn.Module):
                 self.sphere_channels,
             ),
             device=x_edge_m_0.device,
+            dtype=x_edge_m_0.dtype,
         )
         x_edge_m_all = torch.cat((x_edge_m_0, x_edge_m_pad), dim=1)
 
