@@ -5,6 +5,7 @@ import copy
 from e3nn import o3
 from e3nn.o3 import FromS2Grid, ToS2Grid
 
+from .scatter_ops import scatter_add
 from .wigner import wigner_D
 from .edge_rot_mat import _ROTATION_MASK_THRESHOLD
 
@@ -241,14 +242,7 @@ class SO3Embedding:
 
     # Compute the sum of the embeddings of the neighborhood
     def _reduce_edge(self, edge_index, num_nodes):
-        new_embedding = torch.zeros(
-            num_nodes,
-            self.num_m_coefficients,
-            self.num_channels,
-            device=self.embedding.device,
-            dtype=self.embedding.dtype,
-        )
-        new_embedding.index_add_(0, edge_index, self.embedding)
+        new_embedding = scatter_add(self.embedding, edge_index, num_nodes)
         self.set_embedding(new_embedding)
 
     # Reshape the embedding l -> m
@@ -587,7 +581,8 @@ class SO3Linear(torch.nn.Module):
         outputs = torch.einsum(
             "bmi, moi -> bmo", inputs, weight
         )  # [N, (L_max + 1) ** 2, C_out]
-        outputs[:, 0:1, :] = outputs.narrow(1, 0, 1) + self.bias
+        first, rest = torch.split(outputs, [1, outputs.shape[1] - 1], dim=1)
+        outputs = torch.cat([first + self.bias, rest], dim=1)
         return outputs
 
     def __repr__(self):

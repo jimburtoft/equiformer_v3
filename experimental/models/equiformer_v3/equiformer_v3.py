@@ -7,6 +7,7 @@ from fairchem.core.models.base import GraphModelMixin
 
 from .edge_rot_mat import init_edge_rot_mat
 from .envelope import PolynomialEnvelope
+from .scatter_ops import scatter_add
 from .so3 import SO3Rotation, SO3Linear
 from .radial_function import GaussianSmearing, RadialFunction
 from .layer_norm import (
@@ -452,7 +453,7 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
 
         # Final layer norm
         x = self.norm(x)
-        x_scalar = x.narrow(1, 0, 1)
+        x_scalar, _ = torch.split(x, [1, x.shape[1] - 1], dim=1)
         x_scalar = x_scalar.view(x_scalar.shape[0], self.num_channels)
         return x_scalar, x
 
@@ -515,7 +516,7 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
                 edge_index,
                 edge_envelope_weight,
             )
-            forces = forces.narrow(1, 1, 3)
+            _, forces, _ = torch.split(forces, [1, 3, forces.shape[1] - 4], dim=1)
             forces = forces.view(-1, 3)
             outputs["forces"] = forces
 
@@ -693,10 +694,7 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
 
         # Energy prediction
         node_energy = self.energy_block(x_scalar)
-        energy = torch.zeros(
-            self.batch_size, device=node_energy.device, dtype=node_energy.dtype
-        )
-        energy.index_add_(0, batch, node_energy.view(-1))
+        energy = scatter_add(node_energy.view(-1), batch, self.batch_size)
         energy = energy / self.avg_num_nodes
         outputs["energy"] = energy
 
@@ -710,7 +708,7 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
                 edge_index,
                 edge_envelope_weight,
             )
-            forces = forces.narrow(1, 1, 3)
+            _, forces, _ = torch.split(forces, [1, 3, forces.shape[1] - 4], dim=1)
             forces = forces.view(-1, 3)
             outputs["forces"] = forces
 
