@@ -373,6 +373,163 @@ class EquivariantGraphAttention(torch.nn.Module):
 
         return outputs
 
+    def forward_dense(
+        self,
+        x,
+        source_atomic_numbers,
+        target_atomic_numbers,
+        edge_distance,
+        neighbor_idx,
+        num_nodes,
+        max_neighbors,
+        edge_envelope_weight=None,
+        mask=None,
+    ):
+        """
+        Dense padded forward pass - NO scatter, NO CPU fallbacks.
+
+        All edge-level operations use [N*K] flat layout (K = max_neighbors).
+        Scatter-add is replaced by reshape [N*K] -> [N, K] + masked sum(dim=1).
+        GraphSoftmax is replaced by dense F.softmax over neighbor dim with mask.
+
+        The SO3Rotation wigner matrices must be pre-set before calling this method
+        (with shape [N*K, M, M] corresponding to the dense neighbor layout).
+
+        Args:
+            x: [N, M, C] node features (M = (lmax+1)^2)
+            source_atomic_numbers: [N*K] atomic numbers for source atoms (neighbors)
+            target_atomic_numbers: [N*K] atomic numbers for target atoms (center atoms)
+            edge_distance: [N*K, D] radial basis expanded edge distances
+            neighbor_idx: [N, K] indices of neighbor atoms for each node
+            num_nodes: int, N
+            max_neighbors: int, K
+            edge_envelope_weight: [N*K, 1] or None, envelope function weights
+            mask: [N, K] bool tensor, True where neighbor is real (not padding)
+        Returns:
+            outputs: [N, M, C_out]
+        """
+        N = num_nodes
+        K = max_neighbors
+
+        # Compute edge scalar features (invariant to rotations)
+        if self.use_atom_edge_embedding:
+            source_embedding = self.source_embedding(source_atomic_numbers)
+            target_embedding = self.target_embedding(target_atomic_numbers)
+            x_edge = torch.cat(
+                (edge_distance, source_embedding, target_embedding), dim=1
+            )
+        else:
+            x_edge = edge_distance
+
+        # Radial function
+        x_edge_weight = self.rad_func(x_edge)  # [N*K, M, C] or similar
+
+        # Merge source/target node features using dense gather
+        x = x.to(x_edge_weight.dtype)
+        # Dense gather: x[neighbor_idx] gives [N, K, M, C], flatten to [N*K, M, C]
+        x_source = x[neighbor_idx.view(-1)]  # [N*K, M, C]
+        # Target: each center atom repeated K times
+        x_target = (
+            x.unsqueeze(1).expand(-1, K, -1, -1).reshape(N * K, x.shape[1], x.shape[2])
+        )
+
+        if not self.use_add_merge:
+            # Concat
+            x_message = torch.cat((x_source, x_target), dim=2)  # [N*K, M, 2C]
+            if self.use_rad_l_parametrization:
+                x_message = x_message * x_edge_weight
+                x_message = self.so3_rotation.rotate(x_message)
+            else:
+                x_message = self.so3_rotation.rotate(x_message)
+                x_message = x_message * x_edge_weight
+        elif self.use_add_merge:
+            # Add
+            x_edge_weight_source, x_edge_weight_target = torch.split(
+                x_edge_weight, [self.num_in_channels, self.num_in_channels], dim=2
+            )
+            x_source = x_source * x_edge_weight_source
+            x_target = x_target * x_edge_weight_target
+            x_message = x_source + x_target
+            x_message = self.so3_rotation.rotate(x_message)
+
+        x_message, x_m0_extra = self.so2_linear_1(x_message)
+
+        # S2/gate activation
+        if has_scalars(self.activation):
+            x_alpha, x_scalar = torch.split(
+                x_m0_extra, self.split_m0_channels_list, dim=1
+            )
+        else:
+            x_alpha = x_m0_extra
+            x_scalar = None
+        act_input_dict = prepare_activation_forward_param(
+            act_name=self.activation, inputs=x_message, scalars=x_scalar
+        )
+        x_message = self.act(**act_input_dict)
+
+        x_message = self.so2_linear_2(x_message)
+
+        # Graph attention - DENSE version
+        x_alpha = x_alpha.view(
+            -1, self.num_heads, self.attn_alpha_channels
+        )  # [N*K, H, A]
+        x_alpha = self.alpha_norm(x_alpha)
+        x_alpha = self.alpha_act(x_alpha)
+        x_alpha = self.alpha_dropout(x_alpha)
+        alpha = torch.einsum("bik, ik -> bi", x_alpha, self.alpha_dot)  # [N*K, H]
+
+        # Dense softmax: reshape to [N, K, H], apply mask, softmax over K dim
+        alpha = alpha.view(N, K, self.num_heads)  # [N, K, H]
+
+        if self.softcap is not None:
+            alpha = self.attn_softmax.softcap(alpha)
+
+        # Apply envelope rescaling before softmax if provided
+        if edge_envelope_weight is not None:
+            env_dense = edge_envelope_weight.view(N, K, 1)  # [N, K, 1]
+
+        # Masked softmax: set padding positions to -inf before softmax
+        if mask is not None:
+            alpha = alpha.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        alpha = torch.nn.functional.softmax(alpha, dim=1)  # softmax over neighbors
+        # Zero out padding positions after softmax (NaN safety for all-masked rows)
+        if mask is not None:
+            alpha = alpha.masked_fill(~mask.unsqueeze(-1), 0.0)
+
+        # Apply envelope weight after softmax (matches original: alpha * envelope)
+        if edge_envelope_weight is not None:
+            alpha = alpha * env_dense
+
+        # Flatten back to [N*K, H] for per-edge multiplication
+        alpha = alpha.view(N * K, self.num_heads)
+        alpha = alpha.view(N * K, 1, self.num_heads, 1)  # [N*K, 1, H, 1]
+        alpha = self.attn_weights_dropout(alpha)
+
+        # Attention weights * non-linear messages
+        attn = x_message  # [N*K, M, C_val]
+        attn = attn.view(
+            attn.shape[0], attn.shape[1], self.num_heads, self.attn_value_channels
+        )
+        attn = attn * alpha
+        attn = attn.view(
+            attn.shape[0], attn.shape[1], self.num_heads * self.attn_value_channels
+        )
+        x_message = attn
+
+        # Rotate back the irreps
+        x_message = self.so3_rotation.rotate_inv(x_message)
+
+        # DENSE aggregation: reshape [N*K, M, C] -> [N, K, M, C], mask, sum over K
+        x_message = x_message.view(N, K, x_message.shape[1], x_message.shape[2])
+        if mask is not None:
+            x_message = x_message * mask.unsqueeze(-1).unsqueeze(-1)
+        x_message = x_message.sum(dim=1)  # [N, M, C]
+
+        # Project
+        outputs = self.proj(x_message)
+
+        return outputs
+
 
 class FeedForwardNetwork(torch.nn.Module):
     """
@@ -857,6 +1014,54 @@ class TransBlockV3(torch.nn.Module):
         if self.proj_drop is not None:
             outputs = self.proj_drop(outputs)
 
+        if self.ffn_shortcut is not None:
+            x_res = self.ffn_shortcut(x_res)
+
+        outputs = outputs + x_res
+
+        return outputs
+
+    def forward_dense(
+        self,
+        x,
+        source_atomic_numbers,
+        target_atomic_numbers,
+        edge_distance,
+        neighbor_idx,
+        num_nodes,
+        max_neighbors,
+        edge_envelope_weight=None,
+        mask=None,
+    ):
+        """
+        Dense padded forward pass for TransBlockV3.
+        Same as forward() but uses ga.forward_dense() instead of ga.forward().
+        Drop path is disabled (inference only).
+        """
+        outputs = x
+        x_res = x
+
+        outputs = self.norm_1(outputs)
+        outputs = self.ga.forward_dense(
+            outputs,
+            source_atomic_numbers,
+            target_atomic_numbers,
+            edge_distance,
+            neighbor_idx,
+            num_nodes,
+            max_neighbors,
+            edge_envelope_weight,
+            mask,
+        )
+
+        # Skip drop_path (inference only, no dropout)
+        outputs = outputs + x_res
+
+        x_res = outputs
+        outputs = self.norm_2(outputs)
+        outputs = self.ffn(outputs)
+
+        # Skip drop_path (inference only)
         if self.ffn_shortcut is not None:
             x_res = self.ffn_shortcut(x_res)
 

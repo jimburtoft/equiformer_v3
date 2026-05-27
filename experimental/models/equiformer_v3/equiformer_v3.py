@@ -714,6 +714,140 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
 
         return outputs
 
+    def forward_dense(
+        self,
+        atomic_numbers,
+        neighbor_idx,
+        edge_distance,
+        edge_distance_vec,
+        wigner,
+        wigner_inv,
+        mask,
+        batch,
+        batch_size,
+    ):
+        """
+        Dense padded forward pass - NO scatter, NO atan2/acos CPU fallbacks.
+
+        All edge-level operations use dense [N, K] neighbor layout, flattened to
+        [N*K] for per-edge compute. Scatter-add is replaced by reshape + sum.
+        GraphSoftmax is replaced by dense F.softmax with mask.
+
+        Wigner matrices must be pre-computed outside the compiled region (they
+        require atan2/acos which fall back to CPU). Pass them as inputs.
+
+        Args:
+            atomic_numbers: [N] long tensor
+            neighbor_idx: [N, K] long tensor, neighbor atom indices (padded with 0)
+            edge_distance: [N*K] float tensor, scalar distances per edge
+            edge_distance_vec: [N*K, 3] float tensor, distance vectors (not used here
+                               but included for API symmetry; Wigner already computed)
+            wigner: [N*K, M, M] pre-computed Wigner-D matrices
+            wigner_inv: [N*K, M, M] pre-computed inverse Wigner-D matrices
+            mask: [N, K] bool tensor, True where neighbor is real (not padding)
+            batch: [N] long tensor, graph membership
+            batch_size: int, number of graphs in batch
+
+        Returns:
+            dict with 'energy' and optionally 'forces'
+        """
+        self.batch_size = batch_size
+        self.dtype = wigner.dtype
+        self.device = wigner.device
+
+        N = atomic_numbers.shape[0]
+        K = neighbor_idx.shape[1]
+
+        # Set pre-computed Wigner matrices on SO3Rotation
+        self.so3_rotation.wigner = wigner
+        self.so3_rotation.wigner_inv = wigner_inv
+
+        # Compute source/target atomic numbers in dense layout
+        source_atomic_numbers = atomic_numbers[neighbor_idx.view(-1)]  # [N*K]
+        target_atomic_numbers = (
+            atomic_numbers.unsqueeze(1).expand(-1, K).reshape(-1)
+        )  # [N*K]
+
+        # Envelope function on scalar distances
+        edge_envelope_weight = (
+            self.envelope_func(edge_distance)
+            if self.envelope_func is not None
+            else None
+        )  # [N*K, 1] or None
+
+        # Radial basis expansion
+        edge_distance_expanded = self.distance_expansion(edge_distance)  # [N*K, D]
+
+        # --- Embedding ---
+        # Initialize node embedding
+        x = torch.zeros(
+            (N, ((self.lmax + 1) ** 2), self.num_channels),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        atom_embedding = self.sphere_embedding(atomic_numbers)
+        x[:, 0, :] = atom_embedding
+
+        # Edge-degree embedding (dense version)
+        edge_degree = self.edge_degree_embedding.forward_dense(
+            atomic_numbers,
+            edge_distance_expanded,
+            neighbor_idx,
+            N,
+            K,
+            edge_envelope_weight,
+            mask,
+        )
+        x = x + edge_degree
+
+        # --- Transformer blocks ---
+        for i in range(self.num_layers):
+            x = self.blocks[i].forward_dense(
+                x,
+                source_atomic_numbers,
+                target_atomic_numbers,
+                edge_distance_expanded,
+                neighbor_idx,
+                N,
+                K,
+                edge_envelope_weight,
+                mask,
+            )
+
+        # Final layer norm
+        x = self.norm(x)
+        x_scalar, _ = torch.split(x, [1, x.shape[1] - 1], dim=1)
+        x_scalar = x_scalar.view(x_scalar.shape[0], self.num_channels)
+
+        outputs = {}
+
+        # Energy prediction
+        node_energy = self.energy_block(x_scalar)
+        # For single-batch inference, sum all node energies directly
+        # (avoids scatter_add which uses index_add_)
+        energy = node_energy.sum(dim=0, keepdim=True)  # [1]
+        energy = energy / self.avg_num_nodes
+        outputs["energy"] = energy
+
+        # Force prediction (dense version)
+        if self.regress_forces:
+            forces = self.force_block.forward_dense(
+                x,
+                source_atomic_numbers,
+                target_atomic_numbers,
+                edge_distance_expanded,
+                neighbor_idx,
+                N,
+                K,
+                edge_envelope_weight,
+                mask,
+            )
+            _, forces, _ = torch.split(forces, [1, 3, forces.shape[1] - 4], dim=1)
+            forces = forces.view(-1, 3)
+            outputs["forces"] = forces
+
+        return outputs
+
     # Initialize the edge rotation matrics
     def _init_edge_rot_mat(self, edge_distance_vec):
         return init_edge_rot_mat(
