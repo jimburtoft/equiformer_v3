@@ -714,6 +714,24 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
 
         return outputs
 
+    def build_fused_linear(self):
+        """
+        Build fused linear layers throughout the model (NCC_ILSA902 workaround).
+
+        Replaces SO2MLinear's subtract-based complex multiply with a single
+        fused linear that absorbs the negation into the weight matrix.
+        Must be called AFTER loading pre-trained weights.
+
+        This enables fullgraph=True compilation with mmax >= 1.
+        """
+        for block in self.blocks:
+            block.build_fused_linear()
+        # Also handle force block if it has attention (EquivariantGraphAttentionStressHead)
+        if hasattr(self, "force_block") and hasattr(
+            self.force_block, "build_fused_linear"
+        ):
+            self.force_block.build_fused_linear()
+
     def forward_dense(
         self,
         atomic_numbers,

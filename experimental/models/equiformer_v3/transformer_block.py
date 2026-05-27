@@ -373,6 +373,12 @@ class EquivariantGraphAttention(torch.nn.Module):
 
         return outputs
 
+    def build_fused_linear(self):
+        """Build fused linear layers for SO2MLinear (NCC_ILSA902 workaround)."""
+        self.so2_linear_1.build_fused_linear()
+        self.so2_linear_2.build_fused_linear()
+        self._use_fused = True
+
     def forward_dense(
         self,
         x,
@@ -452,7 +458,10 @@ class EquivariantGraphAttention(torch.nn.Module):
             x_message = x_source + x_target
             x_message = self.so3_rotation.rotate(x_message)
 
-        x_message, x_m0_extra = self.so2_linear_1(x_message)
+        if getattr(self, "_use_fused", False):
+            x_message, x_m0_extra = self.so2_linear_1.forward_fused(x_message)
+        else:
+            x_message, x_m0_extra = self.so2_linear_1(x_message)
 
         # S2/gate activation
         if has_scalars(self.activation):
@@ -467,7 +476,10 @@ class EquivariantGraphAttention(torch.nn.Module):
         )
         x_message = self.act(**act_input_dict)
 
-        x_message = self.so2_linear_2(x_message)
+        if getattr(self, "_use_fused", False):
+            x_message = self.so2_linear_2.forward_fused(x_message)
+        else:
+            x_message = self.so2_linear_2(x_message)
 
         # Graph attention - DENSE version
         x_alpha = x_alpha.view(
@@ -1020,6 +1032,10 @@ class TransBlockV3(torch.nn.Module):
         outputs = outputs + x_res
 
         return outputs
+
+    def build_fused_linear(self):
+        """Build fused linear layers for attention SO2MLinear (NCC_ILSA902 workaround)."""
+        self.ga.build_fused_linear()
 
     def forward_dense(
         self,
