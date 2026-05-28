@@ -318,6 +318,9 @@ class SO3Rotation(torch.nn.Module):
         wigner = torch.einsum("mi, nij -> nmj", self.wigner_index_to_m_array, wigner)
         if torch.is_autocast_enabled():
             wigner = wigner.to(torch.float16)
+        wigner = (
+            wigner.contiguous()
+        )  # Critical for Neuron: non-contiguous triggers 235ms strided copy
         wigner_inv = torch.transpose(wigner, 1, 2).contiguous()
         wigner_inv = wigner_inv * self.wigner_inv_rescale
         if torch.is_autocast_enabled():
@@ -507,8 +510,8 @@ class SO3Grid(torch.nn.Module):
             # from_grid_mat = torch.einsum('bai, ji -> baj', from_grid_mat, temp.to_m)
 
         # save tensors and they will be moved to GPU
-        self.register_buffer("to_grid_mat", to_grid_mat)
-        self.register_buffer("from_grid_mat", from_grid_mat)
+        self.register_buffer("to_grid_mat", to_grid_mat.contiguous())
+        self.register_buffer("from_grid_mat", from_grid_mat.contiguous())
 
     # Compute matrices to transform irreps to grid
     def get_to_grid_mat(self):
