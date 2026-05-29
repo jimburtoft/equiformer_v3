@@ -577,10 +577,24 @@ class SO3Linear(torch.nn.Module):
             expand_index[start_idx : (start_idx + length)] = l
         self.register_buffer("expand_index", expand_index)
 
+    def pre_expand_weights(self):
+        """Pre-expand weight from [L+1, C_out, C_in] to [(L+1)^2, C_out, C_in].
+
+        Eliminates the runtime index_select (dynamic DMA) by storing the
+        expanded weight as a contiguous buffer. Call once after model creation.
+        """
+        with torch.no_grad():
+            expanded = self.weight[self.expand_index]  # [(L+1)^2, C_out, C_in]
+        self.weight_expanded = torch.nn.Parameter(expanded.contiguous())
+        self._use_expanded = True
+
     def forward(self, inputs):
-        weight = torch.index_select(
-            self.weight, dim=0, index=self.expand_index
-        )  # [(L_max + 1) ** 2, C_out, C_in]
+        if getattr(self, "_use_expanded", False):
+            weight = self.weight_expanded  # [(L_max + 1) ** 2, C_out, C_in]
+        else:
+            weight = torch.index_select(
+                self.weight, dim=0, index=self.expand_index
+            )  # [(L_max + 1) ** 2, C_out, C_in]
         outputs = torch.einsum(
             "bmi, moi -> bmo", inputs, weight
         )  # [N, (L_max + 1) ** 2, C_out]

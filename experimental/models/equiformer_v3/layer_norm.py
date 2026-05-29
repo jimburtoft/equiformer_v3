@@ -161,6 +161,18 @@ class EquivariantSeparableLayerNorm(torch.nn.Module):
     def __repr__(self):
         return f"{self.__class__.__name__}(lmax={self.lmax}, num_channels={self.num_channels}, eps={self.eps}, std_balance_degrees={self.std_balance_degrees})"
 
+    def pre_expand_weights(self):
+        """Pre-expand affine_weight from [lmax, C] to [(lmax+1)^2-1, C].
+
+        Eliminates runtime index_select for the L>0 affine transformation.
+        """
+        if self.affine:
+            with torch.no_grad():
+                w = self.affine_weight  # [lmax, C]
+                expanded = w[self.expand_index]  # [(lmax+1)^2-1, C]
+            self.affine_weight_expanded = torch.nn.Parameter(expanded.contiguous())
+            self._use_expanded = True
+
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
         """
@@ -201,8 +213,13 @@ class EquivariantSeparableLayerNorm(torch.nn.Module):
             feature_norm = (feature_norm + self.eps).pow(-0.5)
 
             if self.affine:
-                weight = self.affine_weight.view(1, self.lmax, self.num_channels)
-                weight = torch.index_select(weight, dim=1, index=self.expand_index)
+                if getattr(self, "_use_expanded", False):
+                    weight = self.affine_weight_expanded.view(
+                        1, (self.lmax + 1) ** 2 - 1, self.num_channels
+                    )
+                else:
+                    weight = self.affine_weight.view(1, self.lmax, self.num_channels)
+                    weight = torch.index_select(weight, dim=1, index=self.expand_index)
                 feature_norm = feature_norm * weight
             feature = feature * feature_norm
 
@@ -276,6 +293,18 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
     def __repr__(self):
         return f"{self.__class__.__name__}(lmax={self.lmax}, num_channels={self.num_channels}, eps={self.eps}, std_balance_degrees={self.std_balance_degrees}, centering={self.centering})"
 
+    def pre_expand_weights(self):
+        """Pre-expand affine_weight from [lmax+1, C] to [(lmax+1)^2, C].
+
+        Eliminates runtime index_select for the affine transformation.
+        """
+        if self.affine:
+            with torch.no_grad():
+                w = self.affine_weight  # [lmax+1, C]
+                expanded = w[self.expand_index]  # [(lmax+1)^2, C]
+            self.affine_weight_expanded = torch.nn.Parameter(expanded.contiguous())
+            self._use_expanded = True
+
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
         """
@@ -304,8 +333,13 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
                 feature_norm = feature_norm.mean(dim=1, keepdim=True)  # [N, 1, 1]
         feature_norm = (feature_norm + self.eps).pow(-0.5)
         if self.affine:
-            weight = self.affine_weight.view(1, (self.lmax + 1), self.num_channels)
-            weight = torch.index_select(weight, dim=1, index=self.expand_index)
+            if getattr(self, "_use_expanded", False):
+                weight = self.affine_weight_expanded.view(
+                    1, (self.lmax + 1) ** 2, self.num_channels
+                )
+            else:
+                weight = self.affine_weight.view(1, (self.lmax + 1), self.num_channels)
+                weight = torch.index_select(weight, dim=1, index=self.expand_index)
             feature_norm = feature_norm * weight
         outputs = inputs * feature_norm
 
