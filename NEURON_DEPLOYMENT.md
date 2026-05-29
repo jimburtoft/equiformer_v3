@@ -1,8 +1,17 @@
 # EquiformerV3 on AWS Trainium: Deployment Guide
 
 Deploy EquiformerV3 for inference on AWS Trainium (trn2) instances using PyTorch Native
-(`torch.compile` with the `neuron` backend). This guide covers environment setup, model
-preparation, and running optimized inference.
+(`torch.compile` with the Neuron aot_autograd backend). This guide covers environment setup,
+model preparation, and running optimized compiled inference.
+
+> **Performance**: Compiled inference achieves **3–15x speedup** over eager mode on Neuron,
+> and **1.5–1.9x over CPU** at production edge counts. The compilation uses `aot_autograd`
+> with Neuron's decomposition table to fuse operations into optimized NEFFs.
+>
+> Key optimizations applied:
+> - `build_fused_linear()` — NCC_ILSA902 compiler bug workaround
+> - `pre_expand_weights()` — eliminate runtime `index_select` for compilability
+> - `compile_for_neuron()` — 15x speedup via op fusion (aot_autograd + Neuron compiler)
 
 ## Quick Start
 
@@ -20,6 +29,32 @@ bash run_in_docker.sh inference_example.py
 ```
 
 ## Performance Summary
+
+### Compiled Inference (recommended — `compile_for_neuron()`)
+
+Uses `torch.compile` + `aot_autograd` with Neuron decomposition table. Fuses operations
+into optimized NEFFs, achieving 3–15x over eager depending on model size.
+
+**Small model (2-layer, lmax=2, C=64, 1.3M params):**
+
+| Atoms | Neighbors | Edges | Compiled (ms) | Eager (ms) | Speedup |
+|-------|-----------|-------|---------------|-----------|---------|
+| 64    | 10        | 640   | 13            | 190       | 14.6x   |
+| 100   | 10        | 1,000 | 17            | 190       | 11.2x   |
+| 128   | 10        | 1,280 | 17            | 190       | 10.9x   |
+| 256   | 10        | 2,560 | 27            | —         | —       |
+
+**Production model (7-layer, lmax=4, C=128, 79M params):**
+
+| Atoms | Neighbors | Edges | Compiled (ms) | Eager (ms) | Speedup |
+|-------|-----------|-------|---------------|-----------|---------|
+| 50    | 10        | 500   | 107           | ~350      | ~3.3x   |
+| 100   | 10        | 1,000 | 229           | ~770      | 3.4x    |
+| 100   | 30        | 3,000 | 515           | ~1800     | ~3.5x   |
+
+Compile time: 30–110s per new shape (one-time cost, increases with edge count).
+
+### Eager with CPU comparison (forward_static path)
 
 Neuron beats CPU on **all tested configurations** (3K–30K edges):
 
