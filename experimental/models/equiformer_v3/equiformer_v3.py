@@ -842,6 +842,133 @@ class EquiformerV3_OC(torch.nn.Module, GraphModelMixin):
                 batch_size,
             )
 
+    def compile_for_neuron_v2(self, warmup_input=None):
+        """
+        Optimized 2-function compilation strategy for Neuron.
+
+        Splits the model into two compiled functions:
+        1. Embedding: edge processing + atom embedding (small, fast NEFF)
+        2. Blocks + Output: all transformer blocks + norm + energy/force heads
+
+        This achieves ~157ms vs ~215ms for per-layer and ~232ms for the original
+        monolithic approach with graph breaks. The key insight is that combining
+        all blocks into one NEFF reduces spilling (cross-block optimization) while
+        keeping embedding separate avoids the 30+ minute compile of the full model.
+
+        Compile time: ~10-12s total (vs 62s monolithic, 31s per-layer).
+        Runtime: ~157ms at 1000 edges (vs 215ms per-layer, 232ms monolithic).
+
+        Prerequisites: Same as compile_for_neuron().
+        """
+        from torch._dynamo import register_backend
+        from torch._dynamo.backends.common import aot_autograd
+        from torch._functorch._aot_autograd.utils import make_boxed_func
+        from torch_neuronx.neuron_dynamo_backend.backend import (
+            preprocess_graph,
+            get_compile_decomposition_table,
+            make_compiler,
+        )
+
+        decomposition_table = get_compile_decomposition_table()
+
+        def _fw_compiler(gm, example_inputs):
+            gm_processed, analysis = preprocess_graph(gm)
+            compiler = make_compiler(analysis, options=None)
+            return compiler(gm_processed, example_inputs)
+
+        def _compile_backend(gm, example_inputs):
+            aot_backend = aot_autograd(
+                fw_compiler=_fw_compiler,
+                bw_compiler=make_boxed_func,
+                keep_inference_input_mutations=True,
+                decompositions=decomposition_table,
+            )
+            return aot_backend(gm, example_inputs)
+
+        try:
+            register_backend(name="neuron_aot_v2", compiler_fn=_compile_backend)
+        except Exception:
+            pass
+
+        import torch._dynamo
+        from .scatter_ops import scatter_add as _scatter_add
+
+        # --- Function 1: Embedding ---
+        model_ref = self
+
+        def _embedding_fn(atomic_numbers, edge_index, edge_distance, edge_distance_vec):
+            src = atomic_numbers[edge_index[0]]
+            tgt = atomic_numbers[edge_index[1]]
+            ed, ew = model_ref._forward_edge(edge_distance, edge_distance_vec)
+            x = model_ref._forward_embedding(atomic_numbers, ed, edge_index, ew)
+            return x, src, tgt, ed, ew
+
+        torch._dynamo.reset()
+        self._compiled_embedding = torch.compile(_embedding_fn, backend="neuron_aot_v2")
+
+        # --- Function 2: All blocks + output ---
+        def _blocks_output_fn(x, src, tgt, ed, edge_index, ew, batch):
+            for i in range(model_ref.num_layers):
+                x = model_ref.blocks[i](x, src, tgt, ed, edge_index, ew, batch=None)
+            x = model_ref.norm(x)
+            x_scalar, _ = torch.split(x, [1, x.shape[1] - 1], dim=1)
+            x_scalar = x_scalar.view(x_scalar.shape[0], model_ref.num_channels)
+            node_energy = model_ref.energy_block(x_scalar)
+            energy = _scatter_add(node_energy.view(-1), batch, model_ref.batch_size)
+            energy = energy / model_ref.avg_num_nodes
+            forces = model_ref.force_block(x, src, tgt, ed, edge_index, ew)
+            _, forces, _ = torch.split(forces, [1, 3, forces.shape[1] - 4], dim=1)
+            return energy, forces.view(-1, 3)
+
+        torch._dynamo.reset()
+        self._compiled_blocks_output = torch.compile(
+            _blocks_output_fn, backend="neuron_aot_v2"
+        )
+
+        # Warmup if input provided
+        if warmup_input is not None:
+            (
+                atomic_numbers,
+                edge_index,
+                edge_distance,
+                edge_distance_vec,
+                batch,
+                batch_size,
+            ) = warmup_input
+            self.batch_size = batch_size
+            with torch.no_grad():
+                x, src, tgt, ed, ew = self._compiled_embedding(
+                    atomic_numbers, edge_index, edge_distance, edge_distance_vec
+                )
+                energy, forces = self._compiled_blocks_output(
+                    x, src, tgt, ed, edge_index, ew, batch
+                )
+
+        return self
+
+    def forward_compiled_v2(
+        self,
+        atomic_numbers,
+        edge_index,
+        edge_distance,
+        edge_distance_vec,
+        batch,
+        batch_size,
+    ):
+        """
+        Forward pass using the optimized 2-function compiled backend.
+
+        Must call compile_for_neuron_v2() first.
+        """
+        self.batch_size = batch_size
+        x, src, tgt, ed, ew = self._compiled_embedding(
+            atomic_numbers, edge_index, edge_distance, edge_distance_vec
+        )
+        energy, forces = self._compiled_blocks_output(
+            x, src, tgt, ed, edge_index, ew, batch
+        )
+        return {"energy": energy, "forces": forces}
+
     def pre_expand_weights(self):
         """
         Pre-expand all index_select-based weight expansions to static tensors.
