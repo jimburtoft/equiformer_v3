@@ -78,6 +78,9 @@ class SO2MLinear(torch.nn.Module):
         self._fc_fused.weight.requires_grad_(self.fc.weight.requires_grad)
 
     def forward(self, x_m, concat_outputs=True):
+        # Auto-dispatch to fused path if available (avoids NCC_ILSA902 subtract issue)
+        if self._fc_fused is not None:
+            return self.forward_fused(x_m, concat_outputs)
         x_m = self.fc(x_m)
         # Use chunk instead of narrow: backward of chunk is cat (no slice_scatter)
         x_r, x_i = torch.chunk(x_m, chunks=2, dim=2)
@@ -175,7 +178,13 @@ class SO2Linear(torch.nn.Module):
         """
         1.  `x` shape: [num_edges, num_m_components, num_channels]
         2.  We assume the layout of m components is (0, 0, ...), (1, 1, ...), ...
+
+        Auto-dispatches to forward_fused() if build_fused_linear() has been called.
         """
+        # Auto-dispatch: if fused weights are built, use fused path
+        if self.so2_m_linear and self.so2_m_linear[0]._fc_fused is not None:
+            return self.forward_fused(x)
+
         num_edges = x.shape[0]
         outputs = []
 
