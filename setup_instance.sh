@@ -8,12 +8,16 @@ set -e
 # The venv approach with host runtime is broken for backward/autograd.
 # Use run_in_docker.sh to execute code.
 
-echo "=== Step 1: ECR login and pull DLC ==="
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 421672808698.dkr.ecr.us-east-1.amazonaws.com
-docker pull 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+# Set NEURON_PTN_IMAGE to the public PyTorch Native beta image URI and tag
+# (see the AWS Neuron documentation), e.g.:
+#   export NEURON_PTN_IMAGE=<public-pytorch-native-beta-image>:<tag>
+: "${NEURON_PTN_IMAGE:?Set NEURON_PTN_IMAGE to the public PyTorch Native beta image}"
+
+echo "=== Step 1: Pull the PyTorch Native image ==="
+docker pull "$NEURON_PTN_IMAGE"
 
 echo "=== Step 2: Install model dependencies into a persistent container ==="
-imageID=$(docker images -q --filter reference=421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest)
+imageID=$(docker images -q --filter reference="$NEURON_PTN_IMAGE")
 
 # Create a persistent container with deps installed
 docker run --name equiformer_v3_env --privileged $imageID bash -c '

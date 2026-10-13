@@ -16,7 +16,7 @@ model preparation, and running optimized compiled inference.
 ## Quick Start
 
 ```bash
-# On a trn2.3xlarge instance with PyTorch Native DLC
+# On a trn2.3xlarge instance; set NEURON_PTN_IMAGE to the public PyTorch Native beta image first
 git clone https://github.com/jimburtoft/equiformer_v3.git
 cd equiformer_v3
 git checkout neuron-optimize
@@ -70,11 +70,10 @@ Neuron beats CPU on **all tested configurations** (3K–30K edges):
 ## Requirements
 
 - **Instance**: trn2.3xlarge (or larger)
-- **Container**: PyTorch Native Beta DLC
-  ```
-  421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
-  ```
-- **Framework**: PyTorch 2.11, torch_neuronx, neuronx-cc 2.25+
+- **Container**: the public AWS Neuron PyTorch Native (TorchNeuron) beta image. Get the
+  current image URI and tag from the AWS Neuron documentation and use a pinned tag rather
+  than `latest`.
+- **Framework**: PyTorch Native (`torch_neuronx`) with the `neuron` `torch.compile` backend
 - **Python packages**: `e3nn`, `torch-geometric`, `packaging`
 
 ## Environment Setup
@@ -88,19 +87,18 @@ Use a trn2.3xlarge with the standard Neuron DLAMI (Ubuntu 24.04) or any AMI with
 ssh -i your-key.pem ubuntu@<instance-ip>
 ```
 
-### 2. Pull the DLC and Install Dependencies
+### 2. Pull the PyTorch Native Image and Install Dependencies
 
 ```bash
-# ECR login (us-east-1 region for the DLC)
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin 421672808698.dkr.ecr.us-east-1.amazonaws.com
+# Set this to the public PyTorch Native beta image URI and tag from the AWS Neuron docs
+export NEURON_PTN_IMAGE=<public-pytorch-native-beta-image>:<tag>
 
 # Pull the PyTorch Native container
-docker pull 421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
+docker pull "$NEURON_PTN_IMAGE"
 
 # Install model dependencies into a committed image
 docker run --name eq_setup --privileged \
-  421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest \
+  "$NEURON_PTN_IMAGE" \
   bash -c 'pip install e3nn torch-geometric packaging -q'
 docker commit eq_setup equiformer_v3:latest
 docker rm eq_setup
@@ -430,11 +428,9 @@ After first compilation, subsequent runs for the same shape complete in <6 secon
 
 ### "No backend named 'neuron'"
 
-You're not using the PyTorch Native DLC container. The standard DLAMI does not include
-the `neuron` torch.compile backend. Use the DLC:
-```
-421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest
-```
+You're not running inside the PyTorch Native container. The standard DLAMI does not include
+the `neuron` torch.compile backend. Run inside the public PyTorch Native beta image
+(`$NEURON_PTN_IMAGE`, see "Requirements" above).
 
 ### NCC_ILSA902 Compiler Error
 

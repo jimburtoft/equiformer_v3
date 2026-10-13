@@ -36,7 +36,7 @@ Branch: neuron-optimize
 - **Instance type**: trn2.3xlarge (sa-east-1 or any region with trn2)
 - **AMI**: Deep Learning AMI Neuron (Ubuntu 24.04) 20260522 (SDK 2.30)
 - **Docker**: Required — the PyTorch Native DLC container provides torch 2.11
-- **DLC image**: `421672808698.dkr.ecr.us-east-1.amazonaws.com/concourse-release-0461d3b:latest`
+- **Container image**: the public AWS Neuron PyTorch Native beta image (URI and tag from the AWS Neuron docs; export it as `NEURON_PTN_IMAGE`)
 
 ## Install
 
