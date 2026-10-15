@@ -172,7 +172,7 @@ def train_step(model_fn, data, optimizer):
         data["batch_size"],
     )
 
-    # Manual MSE (Ticket 40: F.mse_loss backward fails on Neuron)
+    # Manual MSE (F.mse_loss backward is not supported on Neuron)
     energy_target = torch.zeros(
         data["batch_size"], device="neuron", dtype=outputs["energy"].dtype
     )

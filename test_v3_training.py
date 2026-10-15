@@ -242,7 +242,7 @@ def train_step_eager(model, graph, optimizer, force_weight=10.0):
     )
     forces_target = torch.randn_like(outputs["forces"])
 
-    # Loss (use manual MSE instead of F.mse_loss -- Ticket 40: F.mse_loss backward
+    # Loss (use manual MSE instead of F.mse_loss: F.mse_loss backward
     # fails with torch.compile on Neuron due to torch.constant.int legalization)
     energy_loss = ((outputs["energy"] - energy_target) ** 2).mean()
     forces_loss = ((outputs["forces"] - forces_target) ** 2).mean()
